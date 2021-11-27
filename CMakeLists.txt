@@ -9,3 +9,10 @@ target_link_libraries( MyBle pthread )
 target_link_libraries( MyBle config )
 target_link_libraries( MyBle bluetooth )
 target_link_libraries( MyBle mosquitto )
+
+install(TARGETS MyBle
+   ARCHIVE DESTINATION lib
+   LIBRARY DESTINATION lib
+   RUNTIME DESTINATION bin)
+
+
