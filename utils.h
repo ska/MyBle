@@ -32,12 +32,7 @@
 #define debug(fmt, args...)				debug_cond(_DEBUG, fmt, ##args)
 #define debug_cond(cond, fmt, args...)												\
     do {																			\
-        if (cond) {																	\
-            if(SYSLOG){																\
-                char sl_buffer[200];												\
-                sprintf( sl_buffer, fmt, ##args);									\
-                syslog( LOG_DEBUG, sl_buffer);										\
-            }																		\
+        if (cond) {																		\
             if(DISPLAYLOG){															\
                 fprintf( stdout, "%s[DEBUG]:%s ", KBLU, RESET );					\
                 fprintf( stdout, "%sfunction: %s %s-->\t", KCYN, __func__, RESET );	\
