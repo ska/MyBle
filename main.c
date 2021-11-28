@@ -29,6 +29,8 @@
 #define MQTT_BROKER_IP      "localhost"
 #define MQTT_BROKER_PORT    (1883)
 
+#define CONFIG_FILE "/etc/sossaitherm/sossaitherm.cfg"
+
 #define TEMP 0x0012
 #define HUM  0x0015
 #define BAT  0x000E
@@ -131,7 +133,7 @@ int read_mqtt_config_file(mqtt_th_arg_t *mq)
     int tmp_int;
 
     config_init(&cfg);
-    if(! config_read_file(&cfg, "example.cfg"))
+    if(! config_read_file(&cfg, CONFIG_FILE))
     {
         fprintf(stderr, "%s:%d - %s\n", config_error_file(&cfg),
                 config_error_line(&cfg), config_error_text(&cfg));
@@ -168,7 +170,7 @@ int read_sensor_config_file(sensor_t **s)
 
 
     config_init(&cfg);
-    if(! config_read_file(&cfg, "example.cfg"))
+    if(! config_read_file(&cfg, CONFIG_FILE))
     {
         fprintf(stderr, "%s:%d - %s\n", config_error_file(&cfg),
                 config_error_line(&cfg), config_error_text(&cfg));
