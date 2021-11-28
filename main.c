@@ -391,8 +391,16 @@ void* sensor_poll_th(void *arg)
                 seconds = time(NULL);
                 sens_mqtt[local_sens->id].last = seconds;
                 sprintf(sens_mqtt[local_sens->id].topic, "sossai/appart/%s/sensor", local_sens->name);
+                /* Gui ha problemi a interpretare le virgole, le sostituisco con # */
+                /*
                 sprintf(sens_mqtt[local_sens->id].payload, "{\"id\":%d,\"name\":\"%s\",\"mac\":\"%s\",\"poll\":%d,\"ts\":%ld,"
                                                            "\"temperature\":%.1f,\"humidity\":%.1f,\"battery\": %d}",
+                                                            local_sens->id,   local_sens->name,
+                                                            local_sens->smac, local_sens->polltime,
+                                                            seconds, temp, hum, batt);
+                */
+                sprintf(sens_mqtt[local_sens->id].payload, "\'{\"id\":%d#\"name\":\"%s\"#\"mac\":\"%s\"#\"poll\":%d#\"ts\":%ld#"
+                                                           "\"temperature\":%.1f#\"humidity\":%.1f#\"battery\":%d}\'",
                                                             local_sens->id,   local_sens->name,
                                                             local_sens->smac, local_sens->polltime,
                                                             seconds, temp, hum, batt);
