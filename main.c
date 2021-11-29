@@ -4,32 +4,19 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <poll.h>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <sys/poll.h>
 #include <signal.h>
 #include <time.h>
 #include <pthread.h>
 #include <mosquitto.h>
-#include <libconfig.h>
 #include <time.h>
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/l2cap.h>
 #include "utils.h"
-
-#define ATT_OP_HANDLE_NOTIFY		0x1B
-#if defined(__x86_64__)
-#define BT_MAC  "A4:C1:38:D0:FE:97"
-#define SRC_MAC "00:00:00:00:00:00"
-#else
-#define BT_MAC  "A4:C1:38:39:64:C7"
-#define SRC_MAC "00:00:00:00:00:00"
-#endif
-
-#define MQTT_BROKER_IP      "localhost"
-#define MQTT_BROKER_PORT    (1883)
-
-#define CONFIG_FILE "/etc/sossaitherm/sossaitherm.cfg"
+#include "configfile.h"
+#include "customdatatypes.h"
 
 #define TEMP 0x0012
 #define HUM  0x0015
@@ -38,41 +25,20 @@
 volatile bool run;
 pthread_mutex_t bt_lock;
 pthread_mutex_t sensor_data_lock;/**/
-
-typedef struct {
-    char        address[128];
-    uint16_t    port;
-    uint16_t    sensors;
-} mqtt_th_arg_t;
-
-
-typedef struct {
-    char    topic[128];
-    char    payload[512];
-    time_t  last;
-} sensor_mqtt_t;
-
-typedef struct {
-    uint16_t id;
-    bdaddr_t mac;
-    char smac[20];
-    char name[32];
-    uint16_t polltime;
-} sensor_t;
-
 sensor_mqtt_t *sens_mqtt;
 struct mosquitto * mosq = NULL;
 
-void connect_callback(struct mosquitto * mosq, void * obj, int result) {
-    printf("connect callback, rc=%d\n", result);
+void connect_callback(struct mosquitto * mosq, void * obj, int result)
+{
+    debug("connect callback, rc=%d\n", result);
 }
 void message_callback(struct mosquitto * mosq, void * obj,
                       const struct mosquitto_message * message) {
-    printf("message callback\n");
+    debug("message callback\n");
 }
-void publish_callback(struct mosquitto * mosq, void * userdata, int mid) {
-
-    printf("message published\n");
+void publish_callback(struct mosquitto * mosq, void * userdata, int mid)
+{
+    debug("message published\n");
 }
 
 void* mqtt_th(void *arg)
@@ -80,14 +46,22 @@ void* mqtt_th(void *arg)
     mqtt_th_arg_t *mqtt_args = ((mqtt_th_arg_t *) arg);
     char clientid[24];
     int rc = 0;
+    time_t nextrun;
+
+
+    if (0 == mqtt_args->address[0]) {
+        error("Args error");
+        pthread_exit ((void*)(-1));
+    }
+    debug("MQTT TH. Broker info: %s:%d ", mqtt_args->address, mqtt_args->port);
 
     mosquitto_lib_init();
     memset(clientid, 0, 24);
     snprintf(clientid, 23, "%d", getpid());
     mosq = mosquitto_new(clientid, true, 0);
     if (NULL == mosq) {
-        printf("mosquitto_new error:  %s\n", strerror(errno));
-        pthread_exit(-1);
+        error("mosquitto_new error:  %s\n", strerror(errno));
+        pthread_exit ((void*)(-1));
     }
     mosquitto_connect_callback_set(mosq, connect_callback);
     mosquitto_message_callback_set(mosq, message_callback);
@@ -96,135 +70,54 @@ void* mqtt_th(void *arg)
     rc = mosquitto_connect(mosq, mqtt_args->address, mqtt_args->port, 60);
     if (NULL == mosq) {
         printf("mosquitto_connect error:  %s\n", strerror(errno));
-        pthread_exit(-2);
+        pthread_exit ((void*)(-2));
     }
 
+    nextrun = time(NULL);
     while(run)
     {
-        printf("mqtt th\n");
+        if(nextrun > time(NULL))
+        {
+            sleep(1);
+            continue;
+        }
+
+        debug("mqtt thread waked up!\n");
         pthread_mutex_lock(&sensor_data_lock);
         rc = mosquitto_loop(mosq, -1, 1);
-        printf("mosquitto_loop %d\n", rc);
+        if(run && rc){
+            error("MQTT connection error!\n");
+            sleep(10);
+            mosquitto_reconnect(mosq);
+        }
 
         for(int i=0; i<mqtt_args->sensors; i++)
         {
-            printf("PRE mosquitto_publish\n");
             if(sens_mqtt[i].topic[0] != 0)
             {
-                rc = mosquitto_publish(mosq, NULL, sens_mqtt[i].topic, strlen(sens_mqtt[i].payload), (void * ) sens_mqtt[i].payload, 1, false);
-                printf("mosquitto_publish %d\n", rc);
+                rc = mosquitto_publish(mosq,
+                                       NULL,
+                                       sens_mqtt[i].topic,
+                                       strlen(sens_mqtt[i].payload),
+                                       (void * ) sens_mqtt[i].payload, 1,
+                                       false);
+                debug("mosquitto_publish %d\n", rc);
             }
-            sleep(1);
+            /*100mS*/
+            usleep(100000);
         }
-
         pthread_mutex_unlock(&sensor_data_lock);
-        sleep(10);
+        nextrun = (time(NULL)+10);
+        debug("MQTT TH; going to sleep!\n");
     }
     mosquitto_disconnect(mosq);
     mosquitto_destroy(mosq);
     mosquitto_lib_cleanup();
-    printf("disconnected\n");
-}
-int read_mqtt_config_file(mqtt_th_arg_t *mq)
-{
-    config_t cfg;
-    config_setting_t *setting;
-    const char *str;
-    int tmp_int;
-
-    config_init(&cfg);
-    if(! config_read_file(&cfg, CONFIG_FILE))
-    {
-        fprintf(stderr, "%s:%d - %s\n", config_error_file(&cfg),
-                config_error_line(&cfg), config_error_text(&cfg));
-        config_destroy(&cfg);
-        return(EXIT_FAILURE);
-    }
-
-
-    if(config_lookup_string(&cfg, "broker_addr", &str))
-        fprintf(stdout,"Store broker_addr: %s\n\n", str);
-    else
-        fprintf(stderr, "No 'name' setting in configuration file.\n");
-
-
-    if(config_lookup_int(&cfg, "broker_port", &tmp_int))
-        fprintf(stdout,"Store broker_port: %d\n\n", tmp_int);
-    else
-        fprintf(stderr, "No 'name' setting in configuration file.\n");
-    strcpy((*mq).address, str);
-    (*mq).port = tmp_int;
-
-    config_destroy(&cfg);
-    return 0;
+    debug("MQTT disconnected\n");
+    run = 0;
+    pthread_exit ((void*)(0));
 }
 
-int read_sensor_config_file(sensor_t **s)
-{
-    config_t cfg;
-    config_setting_t *setting;
-    const char *str;
-    int count;
-    const char *tmp_mac, *tmp_name;
-    int tmp_poll;
-
-
-    config_init(&cfg);
-    if(! config_read_file(&cfg, CONFIG_FILE))
-    {
-        fprintf(stderr, "%s:%d - %s\n", config_error_file(&cfg),
-                config_error_line(&cfg), config_error_text(&cfg));
-        config_destroy(&cfg);
-        return(EXIT_FAILURE);
-    }
-
-/*
-    if(config_lookup_string(&cfg, "name", &str))
-        fprintf(stdout,"Store name: %s\n\n", str);
-    else
-        fprintf(stderr, "No 'name' setting in configuration file.\n");
-*/
-
-    setting = config_lookup(&cfg, "sensors");
-    if(setting != NULL)
-    {
-        count = config_setting_length(setting);
-        int i;
-        //s = (sensor_t *) malloc(count * sizeof(sensor_t) );
-        *s = malloc(count * sizeof(sensor_t));
-
-        for(i=0; i < count; i++)
-            (*s)[i].polltime=i;
-
-        fprintf(stdout,"%-20s  %-20s   %s\n", "MAC", "NAME", "POLLTIME");
-        for(i = 0; i < count; ++i)
-        {
-            config_setting_t *sensor = config_setting_get_elem(setting, i);
-            const char *mac, *name;
-            int polltime;
-
-            memset( &(*s)[i], 0, sizeof(sensor_t));
-            if(!(config_setting_lookup_string(sensor, "mac",      &tmp_mac)
-                 && config_setting_lookup_string(sensor, "name",  &tmp_name)
-                 && config_setting_lookup_int(sensor, "polltime", &tmp_poll)))
-                continue;
-
-            (*s)[i].id = i;
-            (*s)[i].polltime=tmp_poll;
-            memcpy((*s)[i].name, tmp_name, strlen(tmp_name));
-            memcpy((*s)[i].smac, tmp_mac,  strlen(tmp_mac));
-            str2ba( tmp_mac, &(*s)[i].mac);
-        }
-
-        for(i = 0; i < count; ++i)
-            printf("%-20s  %-20s  %3d\n", (*s)[i].smac, (*s)[i].name, (*s)[i].polltime);
-
-        putchar('\n');
-    }
-    config_destroy(&cfg);
-
-    return count;
-}
 
 static int bt_write_start_cmd(int sock)
 {
@@ -270,7 +163,7 @@ int bt_io_connect(int *sock, bdaddr_t dst)
     bdaddr_t src;
     struct sockaddr_l2 addr;
 
-    printf("%s\n", __func__);
+    //printf("%s\n", __func__);
     //str2ba(BT_MAC,  &dst);
     str2ba(SRC_MAC, &src);
     dst_type = BDADDR_LE_PUBLIC;
@@ -317,6 +210,7 @@ int bt_io_connect(int *sock, bdaddr_t dst)
         fprintf(stderr, "%s: Err: %d\n", __func__, -err);
         return -3;
     }
+    return 0;
 }
 
 void* sensor_poll_th(void *arg)
@@ -332,10 +226,22 @@ void* sensor_poll_th(void *arg)
     float temp, hum;
     uint8_t batt;
     time_t seconds;
+    time_t nextrun;
 
     flag = 0x00;
+
+    if(NULL == local_sens)
+        pthread_exit ((void*)(-1));
+
+    nextrun = time(NULL);
     while(run)
     {
+        if(nextrun > time(NULL))
+        {
+            sleep(1);
+            continue;
+        }
+
         err_div = 1;
         debug("Thread for sensor %s running\n", local_sens->name);
         pthread_mutex_lock(&bt_lock);
@@ -384,7 +290,6 @@ void* sensor_poll_th(void *arg)
                         break;
                 }
             }
-            printf("flag %02X\n", flag );
             if(flag==0x07)
             {
                 pthread_mutex_lock(&sensor_data_lock);
@@ -417,9 +322,12 @@ void* sensor_poll_th(void *arg)
         debug("shutdown socket for sensor %s\n", local_sens->name);
 onerror:
         pthread_mutex_unlock(&bt_lock);
-        debug("Thread for sensor %s sleeping for %d seconds\n", local_sens->name, local_sens->polltime);
-        sleep(local_sens->polltime*err_div);
+        debug("Thread for sensor %s sleeping for %d seconds\n", local_sens->name, (err_div*local_sens->polltime) );
+        nextrun = (err_div*(time(NULL)+local_sens->polltime));
     }
+    debug("Closing %d (%s) sensor thread\n", local_sens->id, local_sens->name);
+    run = 0;
+    pthread_exit ((void*)(0));
 }
 
 void signal_callback_handler(int signum) {
@@ -427,7 +335,7 @@ void signal_callback_handler(int signum) {
    run = false;
 }
 
-int main()
+int main(int argc, char **argv)
 {
     int sock;
     uint8_t buf[100];
@@ -439,18 +347,40 @@ int main()
     sensor_t *s;
     mqtt_th_arg_t mqtt_args;
 
+    /*
+     * START!!!
+     * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+    printf("Hello from %s - PID: %d\n", argv[0], getpid() );
+
+    /*
+     * Prereq check
+     * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+    if(0!=ucUtilsOpenLockFile())
+    {
+        error("%s already running!\n", argv[0]);
+        return -1;
+    }
+
+    /*
+     * Signals
+     * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
     signal(SIGINT, signal_callback_handler);
 
+    /*
+     * Read Config file/Setup Data
+     * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
     sensors     = read_sensor_config_file(&s);
     sens_tid    = malloc(sensors * sizeof(pthread_t));
     sens_mqtt   = malloc(sensors * sizeof(sensor_mqtt_t));
     memset(sens_mqtt, 0, sensors * sizeof(sensor_mqtt_t));
     memset(&mqtt_args, 0, sizeof(mqtt_th_arg_t));
-
     read_mqtt_config_file(&mqtt_args);
     mqtt_args.sensors = sensors;
-
     run = true;
+
+    /*
+     * Mutex
+     * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
     if (pthread_mutex_init(&bt_lock, NULL) != 0) {
         printf("\n bt_lock init has failed\n");
         return 1;
@@ -461,6 +391,9 @@ int main()
         return 1;
     }
 
+    /*
+     * BLE/Sensors Threads
+     * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
     for(int i=0; i< sensors; i++)
     {
         err = pthread_create( &sens_tid[0], NULL, &sensor_poll_th, (void *) &s[i] );
@@ -468,13 +401,17 @@ int main()
             printf("\nCan't create thread :[%s]", strerror(err));
     }
 
+    /*
+     * MQTT Thread
+     * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
     err = pthread_create( &mqtt_tid, NULL, &mqtt_th, (void *) &mqtt_args );
     if (err != 0)
         printf("\nCan't create thread :[%s]", strerror(err));
 
+    uint8_t c = 0;
     while(run)
     {
-        sleep(10);
+        sleep(1);
     }
 
     /*
@@ -491,5 +428,7 @@ int main()
     pthread_mutex_destroy(&bt_lock);
     pthread_mutex_destroy(&sensor_data_lock);
 
+
+    ucUtilsCloseUnlockFile();
     return 0;
 }
