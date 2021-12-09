@@ -23,15 +23,15 @@ int read_mqtt_config_file(mqtt_th_arg_t *mq)
     }
 
     if(config_lookup_string(&cfg, "broker_addr", &str))
-        fprintf(stdout,"Store broker_addr: %s\n\n", str);
+        debug("Store broker_addr: %s\n\n", str);
     else
-        fprintf(stderr, "No 'name' setting in configuration file.\n");
+        error("No 'broker_addr' setting in configuration file.\n");
 
 
     if(config_lookup_int(&cfg, "broker_port", &tmp_int))
-        fprintf(stdout,"Store broker_port: %d\n\n", tmp_int);
+        debug("Store broker_port: %d\n\n", tmp_int);
     else
-        fprintf(stderr, "No 'name' setting in configuration file.\n");
+        error("No 'broker_port' setting in configuration file.\n");
     strcpy((*mq).address, str);
     (*mq).port = tmp_int;
 

@@ -13,7 +13,9 @@
 #include <mosquitto.h>
 #include <time.h>
 #include <bluetooth/bluetooth.h>
-#include <bluetooth/l2cap.h>
+//#include <bluetooth/l2cap.h>
+#include <bluetooth/hci.h>
+#include <bluetooth/hci_lib.h>
 #include "utils.h"
 #include "configfile.h"
 #include "customdatatypes.h"
@@ -53,7 +55,7 @@ void* mqtt_th(void *arg)
         error("Args error");
         pthread_exit ((void*)(-1));
     }
-    debug("MQTT TH. Broker info: %s:%d ", mqtt_args->address, mqtt_args->port);
+    debug("MQTT TH. Broker info: %s:%d \n", mqtt_args->address, mqtt_args->port);
 
     mosquitto_lib_init();
     memset(clientid, 0, 24);
@@ -107,7 +109,7 @@ void* mqtt_th(void *arg)
             usleep(100000);
         }
         pthread_mutex_unlock(&sensor_data_lock);
-        nextrun = (time(NULL)+10);
+        nextrun = (time(NULL)+30);
         debug("MQTT TH; going to sleep!\n");
     }
     mosquitto_disconnect(mosq);
@@ -118,7 +120,7 @@ void* mqtt_th(void *arg)
     pthread_exit ((void*)(0));
 }
 
-
+#ifdef CLASSIC_BT_MODE
 static int bt_write_start_cmd(int sock)
 {
     uint8_t buf[10];
@@ -145,7 +147,13 @@ static int l2cap_connect(int sock,
         addr.l2_psm = htobs(psm);
 
     addr.l2_bdaddr_type = dst_type;
+
+    debug("Start connect to %02X:%02X:%02X:%02X:%02X:%02X\n",
+           dst->b[5], dst->b[4], dst->b[3], dst->b[2], dst->b[1], dst->b[0] );
+
     err = connect(sock, (struct sockaddr *) &addr, sizeof(addr));
+
+    debug("Connected \n");
     if (err < 0 && !(errno == EAGAIN || errno == EINPROGRESS))
         return -errno;
 
@@ -212,7 +220,7 @@ int bt_io_connect(int *sock, bdaddr_t dst)
     }
     return 0;
 }
-
+#if 0
 void* sensor_poll_th(void *arg)
 {
     sensor_t *local_sens = ((sensor_t *) arg);
@@ -238,6 +246,8 @@ void* sensor_poll_th(void *arg)
     {
         if(nextrun > time(NULL))
         {
+            if(!run)
+                break;
             sleep(1);
             continue;
         }
@@ -329,6 +339,394 @@ onerror:
     run = 0;
     pthread_exit ((void*)(0));
 }
+#else
+
+void* sensors_poll_th(void *arg)
+{
+    sensor_t **local_sens = ((sensor_t **) arg);
+    uint8_t i;
+    time_t nextrun;
+    uint16_t val;
+    uint8_t err_div;
+    float temp, hum;
+    uint8_t batt;
+    int sock, err;
+    uint8_t buf[20];
+    ssize_t len;
+    uint8_t flag, read_cicle;
+    struct pollfd ufds[1];
+    int rv;
+    int timeout;
+    time_t seconds;
+
+    nextrun = time(NULL);
+    while(run)
+    {
+        /*Check howto*/
+        if(nextrun > time(NULL))
+        {
+            if(!run)
+            {
+                debug("Exit on break run: %d\n", run);
+                break;
+            }
+            sleep(1);
+            continue;
+        }
+        /*Time to run*/
+        for(i=0; i<4 && run; i++)
+        {
+            debug("START Thread for sensor %s running\n", (*local_sens)[i].name);
+            pthread_mutex_lock(&bt_lock);
+            debug("Try to connect at %s\n", (*local_sens)[i].name);
+            err = bt_io_connect(&sock, (*local_sens)[i].mac);
+            if(err < 0)
+            {
+                fprintf(stderr, "bt_io_connect ERROR %d\n", err);
+            }
+#if 0
+            err = bt_write_start_cmd(sock);
+            if(err <= 0)
+            {
+                fprintf(stderr, "bt_write_start_cmd ERROR %d\n", err);
+            }
+#endif
+            memset(buf, 0, sizeof(buf));
+#if 0
+            for(int j=0; j<3; j++)
+            {
+                debug("read from socker j: %d\n", j);
+                len = read(sock, buf, sizeof(buf));
+                debug("END read from socker len: %d\n", len);
+            }
+#endif
+
+            ufds[0].fd = sock;
+            ufds[0].events = POLLIN;
+            ufds[0].revents = 0;
+            timeout = 0;
+            while(run)
+            {
+                debug("timeout: %d | flag: %02X\n", timeout, flag);
+                rv = poll(ufds, 1, 2000);
+                debug("timeout: %d | flag: %02X | rv: %d\n", timeout, flag, rv);
+                if(rv == -1)
+                {
+                    printf("Poll  error!\n");
+                    //perror("poll");
+                } else if (rv == 0)
+                {
+                    printf("Timeout occurred!\n");
+                    timeout ++;
+                } else {
+                    debug("ufds[0].revents: %d\n", ufds[0].revents);
+                    if (ufds[0].revents & POLLIN)
+                    {
+                        printf("Poll  read!\n");
+                        len = read(sock, buf, sizeof(buf));
+                        fprintf(stdout, "Read len: %d - ", len);
+                        for(int j=0; j<len; j++)
+                            fprintf(stdout, "buf[%d]: 0x%02X ", j, buf[j] );
+                        fprintf(stdout, "\n", len);
+
+
+                        if (ATT_OP_HANDLE_NOTIFY == buf[0])
+                        {
+                            memcpy(&val, &buf[1], sizeof(val));/*u8 to u16*/
+                            switch(val)
+                            {
+                                case TEMP:
+                                    memcpy(&val, &buf[3], sizeof(val));
+                                    temp = (float)val/10.0;
+                                    debug("TEMP: %d | %02f\n", val, temp);
+                                    flag |= 0x01;
+                                    break;
+                                case HUM:
+                                    memcpy(&val, &buf[3], sizeof(val));
+                                    hum = (float)val/100.0;
+                                    debug("HUM:  %d | %02f\n", val, hum);
+                                    flag |= 0x02;
+                                    break;
+                                case BAT:
+                                    batt = buf[3];
+                                    debug("BAT:  %d \n", batt);
+                                    flag |= 0x04;
+                                    break;
+                            }
+                        }
+                    } else
+                        break;
+
+                }
+
+                if(flag==0x07)
+                    break;
+
+                if(timeout>10)
+                    break;
+            }
+            flag = 0x00;
+            shutdown(sock, SHUT_RDWR);
+            debug("shutdown socket for sensor %s\n", (*local_sens)[i].name);
+
+
+            pthread_mutex_lock(&sensor_data_lock);
+            seconds = time(NULL);
+            sens_mqtt[(*local_sens)[i].id].last = seconds;
+            sprintf(sens_mqtt[(*local_sens)[i].id].topic, "sossai/appart/%s/sensor", (*local_sens)[i].name);
+            /* Gui ha problemi a interpretare le virgole, le sostituisco con # */
+            /*
+            sprintf(sens_mqtt[local_sens->id].payload, "{\"id\":%d,\"name\":\"%s\",\"mac\":\"%s\",\"poll\":%d,\"ts\":%ld,"
+                                                       "\"temperature\":%.1f,\"humidity\":%.1f,\"battery\": %d}",
+                                                        local_sens->id,   local_sens->name,
+                                                        local_sens->smac, local_sens->polltime,
+                                                        seconds, temp, hum, batt);
+            */
+            sprintf(sens_mqtt[(*local_sens)[i].id].payload, "\'{\"id\":%d#\"name\":\"%s\"#\"mac\":\"%s\"#\"poll\":%d#\"ts\":%ld#"
+                                                       "\"temperature\":%.1f#\"humidity\":%.1f#\"battery\":%d}\'",
+                                                        (*local_sens)[i].id,   (*local_sens)[i].name,
+                                                        (*local_sens)[i].smac, (*local_sens)[i].polltime,
+                                                        seconds, temp, hum, batt);
+            debug("Topic %s\n", sens_mqtt[(*local_sens)[i].id].topic);
+            debug("Payload %s\n", sens_mqtt[(*local_sens)[i].id].payload);
+            debug("TS %ld\n", sens_mqtt[(*local_sens)[i].id].last);
+
+            pthread_mutex_unlock(&sensor_data_lock);
+            flag = 0;
+
+            debug("STOP  Thread for sensor %s running\n", (*local_sens)[i].name);
+            pthread_mutex_unlock(&bt_lock);
+            sleep(2);
+        }   /*for(i=0; i<3 && run; i++)*/
+
+        nextrun = time(NULL) + 120;
+    }
+    pthread_exit ((void*)(0));
+}
+#endif
+#endif
+struct hci_request ble_hci_request(uint16_t ocf, int clen, void * status, void * cparam)
+{
+    struct hci_request rq;
+    memset(&rq, 0, sizeof(rq));
+    rq.ogf = OGF_LE_CTL;
+    rq.ocf = ocf;
+    rq.cparam = cparam;
+    rq.clen = clen;
+    rq.rparam = status;
+    rq.rlen = 1;
+    return rq;
+}
+
+void* sensors_poll_th(void *arg)
+{
+    sensor_t **local_sens = ((sensor_t **) arg);
+    int ret, status;
+    int sens;
+    time_t seconds;
+    uint16_t val, temp, battmv;
+    uint8_t pc, hum, batt;
+    int8_t  rssi;
+    word_misto tmpw;
+
+    int device = hci_open_dev(1);
+    if ( device < 0 ) {
+        device = hci_open_dev(0);
+        if (device >= 0) {
+            printf("Using hci0\n");
+        }
+    }
+    else {
+        printf("Using hci1\n");
+    }
+
+    if ( device < 0 ) {
+        perror("Failed to open HCI device.");
+        pthread_exit ((void*)(-1));
+    }
+
+    // Set BLE scan parameters.
+    le_set_scan_parameters_cp scan_params_cp;
+    memset(&scan_params_cp, 0, sizeof(scan_params_cp));
+    scan_params_cp.type 			= 0x00;
+    scan_params_cp.interval 		= htobs(0x0010);
+    scan_params_cp.window 			= htobs(0x0010);
+    scan_params_cp.own_bdaddr_type 	= 0x00; // Public Device Address (default).
+    scan_params_cp.filter 			= 0x00; // Accept all.
+
+    struct hci_request scan_params_rq = ble_hci_request(OCF_LE_SET_SCAN_PARAMETERS, LE_SET_SCAN_PARAMETERS_CP_SIZE, &status, &scan_params_cp);
+
+    ret = hci_send_req(device, &scan_params_rq, 1000);
+    if ( ret < 0 ) {
+        hci_close_dev(device);
+        perror("Failed to set scan parameters data.");
+        pthread_exit ((void*)(-1));
+    }
+    // Set BLE events report mask.
+    le_set_event_mask_cp event_mask_cp;
+    memset(&event_mask_cp, 0, sizeof(le_set_event_mask_cp));
+    int i = 0;
+    for ( i = 0 ; i < 8 ; i++ )
+        event_mask_cp.mask[i] = 0xFF;
+
+    struct hci_request set_mask_rq = ble_hci_request(OCF_LE_SET_EVENT_MASK, LE_SET_EVENT_MASK_CP_SIZE, &status, &event_mask_cp);
+    ret = hci_send_req(device, &set_mask_rq, 1000);
+    if ( ret < 0 ) {
+        hci_close_dev(device);
+        perror("Failed to set event mask.");
+        pthread_exit ((void*)(-1));
+    }
+
+    // Enable scanning.
+    le_set_scan_enable_cp scan_cp;
+    memset(&scan_cp, 0, sizeof(scan_cp));
+    scan_cp.enable 		= 0x01;	// Enable flag.
+    scan_cp.filter_dup 	= 0x00; // Filtering disabled.
+
+    struct hci_request enable_adv_rq = ble_hci_request(OCF_LE_SET_SCAN_ENABLE, LE_SET_SCAN_ENABLE_CP_SIZE, &status, &scan_cp);
+
+    ret = hci_send_req(device, &enable_adv_rq, 1000);
+    if ( ret < 0 ) {
+        hci_close_dev(device);
+        perror("Failed to enable scan.");
+        pthread_exit ((void*)(-1));
+    }
+
+    // Get Results.
+    struct hci_filter nf;
+    hci_filter_clear(&nf);
+    hci_filter_set_ptype(HCI_EVENT_PKT, &nf);
+    hci_filter_set_event(EVT_LE_META_EVENT, &nf);
+    if ( setsockopt(device, SOL_HCI, HCI_FILTER, &nf, sizeof(nf)) < 0 ) {
+        hci_close_dev(device);
+        perror("Could not set socket options\n");
+        pthread_exit ((void*)(-1));
+    }
+
+    uint8_t buf[HCI_MAX_EVENT_SIZE];
+    evt_le_meta_event * meta_event;
+    le_advertising_info * info;
+    int len;
+
+    int count = 0;
+    unsigned now = (unsigned)time(NULL);
+    unsigned last_detection_time = now;
+    // Keep scanning until we see nothing for 10 secs or we have seen lots of advertisements.  Then exit.
+    // We exit in this case because the scan may have failed or stopped. Higher level code can restart
+    //while ( last_detection_time - now < 10 && count < 1000 )
+    while ( run )
+    {
+        len = read(device, buf, sizeof(buf));
+        if ( len >= HCI_EVENT_HDR_SIZE )
+        {
+            count++;
+            last_detection_time = (unsigned)time(NULL);
+            meta_event = (evt_le_meta_event*)(buf+HCI_EVENT_HDR_SIZE+1);
+            if ( meta_event->subevent == EVT_LE_ADVERTISING_REPORT )
+            {
+                uint8_t reports_count = meta_event->data[0];
+                void * offset = meta_event->data + 1;
+                while ( reports_count-- )
+                {
+                    info = (le_advertising_info *)offset;
+
+                    if(info->length!=17)
+                    {
+                        //printf("continue: L:%d\n", info->length);
+                        continue;
+                    }
+
+                    char addr[18];
+                    ba2str(&(info->bdaddr), addr);
+
+                    for(sens=0; sens<5; sens++)
+                    {
+                        if( 0==strcmp(&addr, &(*local_sens)[sens].smac ) )
+                        {
+/*
+                            printf("Sensore %d: %s - %s\n", sens, (*local_sens)[sens].smac, (*local_sens)[sens].name);
+                            //printf("Mac: %s RSSI: %d\n", addr, (int8_t)info->data[info->length]);
+
+                            printf("Data: L:%d - ", info->length);
+                            for (int i = 0; i<info->length; i++) {
+                                printf(" %02X", (unsigned char)info->data[i]);
+                            }
+                            printf("\n");
+
+
+                            printf("Mac: ");
+                            for (int i = 4; i<info->length && i<10; i++) {
+                                printf("%02X%c", (unsigned char)info->data[i], ((i<9)?':':' ') );
+                            }
+*/
+                            tmpw.alto = (unsigned char)info->data[10];
+                            tmpw.basso = (unsigned char)info->data[11];
+                            temp = tmpw.completo;
+                            tmpw.alto = (unsigned char)info->data[14];
+                            tmpw.basso = (unsigned char)info->data[15];
+                            battmv = tmpw.completo;
+
+                            rssi = info->data[17];
+                            hum  = info->data[12];
+                            batt = info->data[13];
+                            pc   = info->data[16];
+/*
+                            printf(" -> RSSI: %d | PC: %d | Temp: %ddC | Hum: %d%% | Batt: %d%% | Batt: %dmV",
+                                   rssi, pc, temp, hum, batt, battmv);
+                            printf("\n\n");
+*/
+                            pthread_mutex_lock(&sensor_data_lock);
+                            seconds = time(NULL);
+                            sens_mqtt[(*local_sens)[sens].id].last = seconds;
+                            sprintf(sens_mqtt[(*local_sens)[sens].id].topic, "sossai/appart/%s/sensor", (*local_sens)[sens].name);
+                            /* Gui ha problemi a interpretare le virgole, le sostituisco con # */
+                            /*
+                            sprintf(sens_mqtt[local_sens->id].payload, "{\"id\":%d,\"name\":\"%s\",\"mac\":\"%s\",\"poll\":%d,\"ts\":%ld,"
+                                                                       "\"temperature\":%.1f,\"humidity\":%d,\"battery\": %d}",
+                                                                        local_sens->id,   local_sens->name,
+                                                                        local_sens->smac, local_sens->polltime,
+                                                                        seconds, temp, hum, batt);
+                            */
+                            sprintf(sens_mqtt[(*local_sens)[sens].id].payload, "\'{\"id\":%d#\"name\":\"%s\"#\"mac\":\"%s\"#\"poll\":%d#\"ts\":%ld#"
+                                                                       "\"temperature\":%.1f#\"humidity\":%d#\"tempdc\":%d#\"battery\":%d#\"battmv\":%d}\'",
+                                                                        (*local_sens)[sens].id,   (*local_sens)[sens].name,
+                                                                        (*local_sens)[sens].smac, (*local_sens)[sens].polltime,
+                                                                        seconds, (float)temp/(10.0), hum, temp, batt, battmv);
+                            debug("Topic %s\n", sens_mqtt[(*local_sens)[sens].id].topic);
+                            debug("Payload %s\n", sens_mqtt[(*local_sens)[sens].id].payload);
+                            debug("TS %ld\n", sens_mqtt[(*local_sens)[sens].id].last);
+
+                            pthread_mutex_unlock(&sensor_data_lock);
+
+
+                        }
+                    }
+                    offset = info->data + info->length + 2;
+                }
+            }
+        }
+        now = (unsigned)time(NULL);
+    }
+
+
+    // Disable scanning.
+    memset(&scan_cp, 0, sizeof(scan_cp));
+    scan_cp.enable = 0x00;	// Disable flag.
+
+    struct hci_request disable_adv_rq = ble_hci_request(OCF_LE_SET_SCAN_ENABLE, LE_SET_SCAN_ENABLE_CP_SIZE, &status, &scan_cp);
+    ret = hci_send_req(device, &disable_adv_rq, 1000);
+    if ( ret < 0 ) {
+        hci_close_dev(device);
+        perror("Failed to disable scan.");
+        return 0;
+    }
+
+    hci_close_dev(device);
+
+    run = 0;
+    pthread_exit ((void*)(0));
+}
+
 
 void signal_callback_handler(int signum) {
    debug("Exit %d\n", run);
@@ -370,6 +768,7 @@ int main(int argc, char **argv)
      * Read Config file/Setup Data
      * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
     sensors     = read_sensor_config_file(&s);
+    debug("Found %d sensors\n", sensors );
     sens_tid    = malloc(sensors * sizeof(pthread_t));
     sens_mqtt   = malloc(sensors * sizeof(sensor_mqtt_t));
     memset(sens_mqtt, 0, sensors * sizeof(sensor_mqtt_t));
@@ -394,12 +793,25 @@ int main(int argc, char **argv)
     /*
      * BLE/Sensors Threads
      * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+#ifdef CLASSIC_BT_MODE
+#if 0
     for(int i=0; i< sensors; i++)
     {
         err = pthread_create( &sens_tid[0], NULL, &sensor_poll_th, (void *) &s[i] );
         if (err != 0)
             printf("\nCan't create thread :[%s]", strerror(err));
     }
+#else
+
+    err = pthread_create( &sens_tid[0], NULL, &sensors_poll_th, (void *) &s );
+    if (err != 0)
+        printf("\nCan't create thread :[%s]", strerror(err));
+#endif
+#endif
+    err = pthread_create( &sens_tid[0], NULL, &sensors_poll_th, (void *) &s );
+    if (err != 0)
+        printf("\nCan't create thread :[%s]", strerror(err));
+
 
     /*
      * MQTT Thread
@@ -411,16 +823,22 @@ int main(int argc, char **argv)
     uint8_t c = 0;
     while(run)
     {
-        sleep(1);
+        sleep(2);
     }
 
     /*
      * Wait for Exit
      * * * * * * * * * * * * * */
+    #if 0
     for(int i=0; i< sensors; i++)
     {
+        debug("Wait join sens_tid: %d \n", i);
         pthread_join( sens_tid[i], NULL);
     }
+#else
+    pthread_join( sens_tid[0], NULL);
+#endif
+    debug("Wait join mqtt_tid\n");
     pthread_join( mqtt_tid, NULL);
     free(sens_tid);
     free(s);
@@ -430,5 +848,7 @@ int main(int argc, char **argv)
 
 
     ucUtilsCloseUnlockFile();
+
+    debug("END END END\n");
     return 0;
 }

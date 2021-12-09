@@ -2,11 +2,19 @@
 #define UTILS_H
 #include <stdio.h>
 #include <stdint.h>
+#include <unistd.h>
 /*
  * CONFIGS
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 #define SRC_MAC "00:00:00:00:00:00"
+
+#define ATT_OP_HANDLE_NOTIFY		0x1B
+#if defined(__x86_64__)
+#define CONFIG_FILE "./example.cfg"
+#else
 #define CONFIG_FILE "/etc/sossaitherm/sossaitherm.cfg"
+#endif
+
 #define ATT_OP_HANDLE_NOTIFY           0x1B
 
 
